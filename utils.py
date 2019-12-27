@@ -41,7 +41,7 @@ class LrScheduler:
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
             if epoch%self.epoch_step==0:
-                print '# setting learning_rate to %.2E'%lr
+                print('# setting learning_rate to %.2E'%lr)
 
 
 # load model weights trained using scripts from https://github.com/felixgwu/img_classification_pk_pytorch OR
@@ -77,7 +77,7 @@ def load_weights_to_flatresnet(source_model, target_model):
         if translated in target_state.keys():
             target_state[translated] = source_state[key]
         else:
-            print translated, 'block missing'
+            print(translated, 'block missing')
 
     target_model.load_state_dict(target_state)
     return target_model
@@ -89,82 +89,40 @@ def load_checkpoint(rnet, agent, load):
     checkpoint = torch.load(load)
     if 'resnet' in checkpoint:
         rnet.load_state_dict(checkpoint['resnet'])
-        print 'loaded resnet from', os.path.basename(load)
+        print('loaded resnet from', os.path.basename(load))
     if 'agent' in checkpoint:
         agent.load_state_dict(checkpoint['agent'])
-        print 'loaded agent from', os.path.basename(load)
+        print('loaded agent from', os.path.basename(load))
     # backward compatibility (some old checkpoints)
     if 'net' in checkpoint:
         checkpoint['net'] = {k:v for k,v in checkpoint['net'].items() if 'features.fc' not in k}
         agent.load_state_dict(checkpoint['net'])
-        print 'loaded agent from', os.path.basename(load)
+        print('loaded agent from', os.path.basename(load))
 
 
-def get_transforms(rnet, dset):
-
-    # Only the R32 pretrained model subtracts the mean, sorry :(
-    if dset=='C10' and rnet=='R32':
-        mean = [x/255.0 for x in [125.3, 123.0, 113.9]]
-        std = [x/255.0 for x in [63.0, 62.1, 66.7]]
-        transform_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std)
-            ])
-
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std)
-            ])
-
-    elif dset=='C100' or dset=='C10' and rnet!='R32':
-        transform_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            ])
-
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            ])
-
-    elif dset=='ImgNet':
-        mean = [0.485, 0.456, 0.406]
-        std = [0.229, 0.224, 0.225]
-        transform_train = transforms.Compose([
-            transforms.Scale(256),
-            transforms.RandomCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std)
-            ])
-
-        transform_test = transforms.Compose([
-            transforms.Scale(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std)
-            ])
-
-
-    return transform_train, transform_test
 
 # Pick from the datasets available and the hundreds of models we have lying around depending on the requirements.
 def get_dataset(model, root='data/'):
 
-    rnet, dset = model.split('_')
-    transform_train, transform_test = get_transforms(rnet, dset)
+    mean = [x/255.0 for x in [125.3, 123.0, 113.9]]
+    std = [x/255.0 for x in [63.0, 62.1, 66.7]]
 
-    if dset=='C10':
-        trainset = torchdata.CIFAR10(root=root, train=True, download=True, transform=transform_train)
-        testset = torchdata.CIFAR10(root=root, train=False, download=True, transform=transform_test)
-    elif dset=='C100':
-        trainset = torchdata.CIFAR100(root=root, train=True, download=True, transform=transform_train)
-        testset = torchdata.CIFAR100(root=root, train=False, download=True, transform=transform_test)
-    elif dset=='ImgNet':
-        trainset = torchdata.ImageFolder(root+'/train/', transform_train)
-        testset = torchdata.ImageFolder(root+'/val/', transform_test)
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std)
+        ])
+
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std)
+        ])
+
+
+
+    trainset = torchdata.CIFAR10(root=root, train=True, download=True, transform=transform_train)
+    testset = torchdata.CIFAR10(root=root, train=False, download=True, transform=transform_test)
 
     return trainset, testset
 
@@ -173,38 +131,16 @@ def get_model(model):
 
     from models import resnet, base
 
-    if model=='R32_C10':
-        rnet_checkpoint = 'cv/pretrained/R32_C10/pk_E_164_A_0.923.t7'
-        layer_config = [5, 5, 5]
-        rnet = resnet.FlatResNet32(base.BasicBlock, layer_config, num_classes=10)
-        agent = resnet.Policy32([1,1,1], num_blocks=15)
+    assert model == 'R32_C10'
 
-    elif model=='R110_C10':
-        rnet_checkpoint = 'cv/pretrained/R110_C10/pk_E_130_A_0.932.t7'
-        layer_config = [18, 18, 18]
-        rnet = resnet.FlatResNet32(base.BasicBlock, layer_config, num_classes=10)
-        agent = resnet.Policy32([1,1,1], num_blocks=54)
+    rnet_checkpoint = 'cv/pretrained/R32_C10/pk_E_164_A_0.923.t7'
+    layer_config = [5, 5, 5]
+    rnet = resnet.FlatResNet32(base.BasicBlock, layer_config, num_classes=10)
+    agent = resnet.Policy32([1,1,1], num_blocks=15)
 
-    elif model=='R32_C100':
-        rnet_checkpoint = 'cv/pretrained/R32_C100/pk_E_164_A_0.693.t7'
-        layer_config = [5, 5, 5]
-        rnet = resnet.FlatResNet32(base.BasicBlock, layer_config, num_classes=100)
-        agent = resnet.Policy32([1,1,1], num_blocks=15)
-
-    elif model=='R110_C100':
-        rnet_checkpoint = 'cv/pretrained/R110_C100/pk_E_160_A_0.723.t7'
-        layer_config = [18, 18, 18]
-        rnet = resnet.FlatResNet32(base.BasicBlock, layer_config, num_classes=100)
-        agent = resnet.Policy32([1,1,1], num_blocks=54)
-
-    elif model=='R101_ImgNet':
-        rnet_checkpoint = 'cv/pretrained/R101_ImgNet/ImageNet_R101_224_76.464'
-        layer_config = [3,4,23,3]
-        rnet = resnet.FlatResNet224(base.Bottleneck, layer_config, num_classes=1000)
-        agent = resnet.Policy224([1,1,1,1], num_blocks=33)
 
     # load pretrained weights into flat ResNet
-    rnet_checkpoint = torch.load(rnet_checkpoint)
-    load_weights_to_flatresnet(rnet_checkpoint, rnet)
+    #rnet_checkpoint = torch.load(rnet_checkpoint)
+    #load_weights_to_flatresnet(rnet_checkpoint, rnet)
 
     return rnet, agent

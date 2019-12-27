@@ -1,5 +1,4 @@
 import os
-from tensorboard_logger import configure, log_value
 import torch
 import torch.autograd as autograd
 from torch.autograd import Variable
@@ -29,7 +28,7 @@ parser.add_argument('--batch_size', type=int, default=256, help='batch size')
 parser.add_argument('--epoch_step', type=int, default=10000, help='epochs after which lr is decayed')
 parser.add_argument('--max_epochs', type=int, default=10000, help='total epochs to run')
 parser.add_argument('--lr_decay_ratio', type=float, default=0.1, help='lr *= lr_decay_ratio after epoch_steps')
-parser.add_argument('--parallel', action ='store_true', default=False, help='use multiple GPUs for training')
+#parser.add_argument('--parallel', action ='store_true', default=False, help='use multiple GPUs for training')
 parser.add_argument('--cl_step', type=int, default=1, help='steps for curriculum training')
 # parser.add_argument('--joint', action ='store_true', default=True, help='train both the policy network and the resnet')
 parser.add_argument('--penalty', type=float, default=-1, help='gamma: reward for incorrect predictions')
@@ -41,15 +40,21 @@ if not os.path.exists(args.cv_dir):
 utils.save_args(__file__, args)
 
 def get_reward(preds, targets, policy):
+    '''
+        policy (batch_size, num_blocks): 0 / 1
+        preds (batch_size, num_classes)
+        targets (batch_size, )
+    '''
 
-    block_use = policy.sum(1).float()/policy.size(1)
+    block_use = policy.sum(1).float()/policy.size(1) # block utilization
     sparse_reward = 1.0-block_use**2
 
     _, pred_idx = preds.max(1)
-    match = (pred_idx==targets).data
+    match = (pred_idx==targets).data # (batch_size,): True / False
 
     reward = sparse_reward
-    reward[1-match] = args.penalty
+    #reward[1-match] = args.penalty
+    reward[~(match)] = args.penalty # args.penalty: -1. If not match, set the reward as -1
     reward = reward.unsqueeze(1)
 
     return reward, match.float()
@@ -62,11 +67,14 @@ def train(epoch):
     matches, rewards, policies = [], [], []
     for batch_idx, (inputs, targets) in tqdm.tqdm(enumerate(trainloader), total=len(trainloader)):
 
-        inputs, targets = Variable(inputs), Variable(targets).cuda(async=True)
-        if not args.parallel:
-            inputs = inputs.cuda()
+        #inputs, targets = Variable(inputs), Variable(targets).cuda(async=True)
+        inputs = inputs.cuda()
+        targets = targets.cuda()
+        #if not args.parallel:
+        #    inputs = inputs.cuda()
 
-        probs, value = agent(inputs)
+        #probs, value = agent(inputs) # (batch_size, num_blocks), (batch_size,)
+        probs, _ = agent(inputs) # (batch_size, num_blocks), (batch_size,)
 
         #---------------------------------------------------------------------#
 
@@ -77,7 +85,7 @@ def train(epoch):
 
         probs = probs*args.alpha + (1-probs)*(1-args.alpha)
         distr = Bernoulli(probs)
-        policy = distr.sample()
+        policy = distr.sample() # 0 / 1
 
         if args.cl_step < num_blocks:
             policy[:, :-args.cl_step] = 1
@@ -88,7 +96,8 @@ def train(epoch):
         else:
             policy_mask = None
 
-        v_inputs = Variable(inputs.data, volatile=True)
+        #v_inputs = Variable(inputs.data, volatile=True)
+        v_inputs = Variable(inputs.data)
         preds_map = rnet.forward(v_inputs, policy_map)
         preds_sample = rnet.forward(v_inputs, policy)
 
@@ -97,8 +106,8 @@ def train(epoch):
 
         advantage = reward_sample - reward_map
 
-        loss = -distr.log_prob(policy)
-        loss = loss * Variable(advantage).expand_as(policy)
+        loss = -distr.log_prob(policy) # (batch_size, num_blocks)
+        loss = loss * Variable(advantage).expand_as(policy) # advantage (batch_size, 1)
 
         if policy_mask is not None:
             loss = policy_mask * loss # mask for curriculum learning
@@ -107,7 +116,7 @@ def train(epoch):
 
         probs = probs.clamp(1e-15, 1-1e-15)
         entropy_loss = -probs*torch.log(probs)
-        entropy_loss = args.beta*entropy_loss.sum()
+        entropy_loss = args.beta*entropy_loss.sum() # beta: 1e-1
 
         loss = (loss - entropy_loss)/inputs.size(0)
 
@@ -124,56 +133,46 @@ def train(epoch):
     accuracy, reward, sparsity, variance, policy_set = utils.performance_stats(policies, rewards, matches)
 
     log_str = 'E: %d | A: %.3f | R: %.2E | S: %.3f | V: %.3f | #: %d'%(epoch, accuracy, reward, sparsity, variance, len(policy_set))
-    print log_str
-
-    log_value('train_accuracy', accuracy, epoch)
-    log_value('train_reward', reward, epoch)
-    log_value('train_sparsity', sparsity, epoch)
-    log_value('train_variance', variance, epoch)
-    log_value('train_unique_policies', len(policy_set), epoch)
-
+    print(log_str)
 
 def test(epoch):
 
     agent.eval()
+    rnet.eval() # ji
 
     matches, rewards, policies = [], [], []
-    for batch_idx, (inputs, targets) in tqdm.tqdm(enumerate(testloader), total=len(testloader)):
+    with torch.no_grad():
+        for batch_idx, (inputs, targets) in tqdm.tqdm(enumerate(testloader), total=len(testloader)):
 
-        inputs, targets = Variable(inputs, volatile=True), Variable(targets).cuda(async=True)
-        if not args.parallel:
+            #inputs, targets = Variable(inputs, volatile=True), Variable(targets).cuda(async=True)
             inputs = inputs.cuda()
+            targets = targets.cuda()
 
-        probs, _ = agent(inputs)
+            probs, _ = agent(inputs)
 
-        policy = probs.data.clone()
-        policy[policy<0.5] = 0.0
-        policy[policy>=0.5] = 1.0
-        policy = Variable(policy)
+            policy = probs.data.clone()
+            policy[policy<0.5] = 0.0
+            policy[policy>=0.5] = 1.0
+            policy = Variable(policy)
 
-        if args.cl_step < num_blocks:
-            policy[:, :-args.cl_step] = 1
+            if args.cl_step < num_blocks:
+                policy[:, :-args.cl_step] = 1
 
-        preds = rnet.forward(inputs, policy)
-        reward, match = get_reward(preds, targets, policy.data)
+            preds = rnet.forward(inputs, policy)
+            reward, match = get_reward(preds, targets, policy.data)
 
-        matches.append(match)
-        rewards.append(reward)
-        policies.append(policy.data)
+            matches.append(match)
+            rewards.append(reward)
+            policies.append(policy.data)
 
     accuracy, reward, sparsity, variance, policy_set = utils.performance_stats(policies, rewards, matches)
 
     log_str = 'TS - A: %.3f | R: %.2E | S: %.3f | V: %.3f | #: %d'%(accuracy, reward, sparsity, variance, len(policy_set))
-    print log_str
-
-    log_value('test_accuracy', accuracy, epoch)
-    log_value('test_reward', reward, epoch)
-    log_value('test_sparsity', sparsity, epoch)
-    log_value('test_variance', variance, epoch)
-    log_value('test_unique_policies', len(policy_set), epoch)
+    print(log_str)
 
     # save the model
-    agent_state_dict = agent.module.state_dict() if args.parallel else agent.state_dict()
+    #agent_state_dict = agent.module.state_dict() if args.parallel else agent.state_dict()
+    agent_state_dict = agent.state_dict()
 
     state = {
       'agent': agent_state_dict,
@@ -182,6 +181,10 @@ def test(epoch):
       'acc': accuracy
     }
     torch.save(state, args.cv_dir+'/ckpt_E_%d_A_%.3f_R_%.2E_S_%.2f_#_%d.t7'%(epoch, accuracy, reward, sparsity, len(policy_set)))
+
+
+    agent.train() # ji
+    rnet.train() # ji
 
 
 #--------------------------------------------------------------------------------------------------------#
@@ -196,28 +199,24 @@ if args.load is not None:
     checkpoint = torch.load(args.load)
     agent.load_state_dict(checkpoint['agent'])
     start_epoch = checkpoint['epoch'] + 1
-    print 'loaded agent from', args.load
-
-if args.parallel:
-    agent = nn.DataParallel(agent)
-    rnet = nn.DataParallel(rnet)
+    print('loaded agent from', args.load)
 
 rnet.eval().cuda()
 agent.cuda()
 
 optimizer = optim.Adam(agent.parameters(), lr=args.lr, weight_decay=args.wd)
 
-configure(args.cv_dir+'/log', flush_secs=5)
 lr_scheduler = utils.LrScheduler(optimizer, args.lr, args.lr_decay_ratio, args.epoch_step)
 for epoch in range(start_epoch, start_epoch+args.max_epochs+1):
     lr_scheduler.adjust_learning_rate(epoch)
 
+    # We only train the last cl_step blocks
     if args.cl_step < num_blocks:
         args.cl_step = 1 + 1 * (epoch // 1)
     else:
-        args.cl_step = num_blocks
+        args.cl_step = num_blocks 
 
-    print 'training the last %d blocks ...' % args.cl_step
+    print('training the last %d blocks ...' % args.cl_step)
     train(epoch)
 
     if epoch % 10 == 0:
